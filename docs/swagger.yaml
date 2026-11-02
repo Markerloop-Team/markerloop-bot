@@ -1,0 +1,198 @@
+basePath: /api/v1
+definitions:
+  models.ErrorResponseSwagger:
+    properties:
+      error:
+        example: bad_request
+        type: string
+      message:
+        example: Ошибка
+        type: string
+      success:
+        example: false
+        type: boolean
+    type: object
+  models.GenerateOAuthTokenRequest:
+    properties:
+      user_id:
+        type: string
+    required:
+    - user_id
+    type: object
+  models.GenericSuccessResponse:
+    properties:
+      message:
+        type: string
+      success:
+        example: true
+        type: boolean
+    type: object
+  models.SendBroadcastRequest:
+    properties:
+      message:
+        type: string
+      title:
+        type: string
+    required:
+    - message
+    - title
+    type: object
+  models.SendNotificationRequest:
+    properties:
+      message:
+        type: string
+      title:
+        type: string
+      user_id:
+        type: string
+    required:
+    - message
+    - title
+    - user_id
+    type: object
+info:
+  contact: {}
+  description: Сервис Telegram бота Markerloop (webhook, уведомления, OAuth)
+  title: Telegram Bot Service API
+  version: "1.0"
+paths:
+  /notifications/broadcast:
+    post:
+      consumes:
+      - application/json
+      description: Отправляет Telegram уведомление всем пользователям. Service-to-service
+        endpoint.
+      parameters:
+      - description: Данные рассылки
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.SendBroadcastRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.GenericSuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponseSwagger'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponseSwagger'
+      security:
+      - ServiceKey: []
+      summary: Рассылка уведомлений
+      tags:
+      - telegram
+  /notifications/send:
+    post:
+      consumes:
+      - application/json
+      description: Отправляет Telegram уведомление пользователю. Service-to-service
+        endpoint.
+      parameters:
+      - description: Данные уведомления
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.SendNotificationRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.GenericSuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponseSwagger'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponseSwagger'
+      security:
+      - ServiceKey: []
+      summary: Отправить уведомление
+      tags:
+      - telegram
+  /oauth/generate-token:
+    post:
+      consumes:
+      - application/json
+      description: Генерирует deep link для привязки Telegram аккаунта. Service-to-service
+        endpoint.
+      parameters:
+      - description: ID пользователя
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.GenerateOAuthTokenRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.GenericSuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponseSwagger'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/models.ErrorResponseSwagger'
+      security:
+      - ServiceKey: []
+      summary: Генерация OAuth deep link
+      tags:
+      - telegram
+  /webhook/telegram:
+    post:
+      consumes:
+      - application/json
+      description: Принимает обновления от Telegram Bot API.
+      parameters:
+      - description: secret_token, заданный при setWebhook (обязателен, если задан
+          TELEGRAM_WEBHOOK_SECRET)
+        in: header
+        name: X-Telegram-Bot-Api-Secret-Token
+        required: true
+        type: string
+      - description: Telegram Update объект
+        in: body
+        name: update
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.GenericSuccessResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/models.ErrorResponseSwagger'
+        "401":
+          description: secret token отсутствует или не совпадает (без тела)
+      summary: Telegram Webhook
+      tags:
+      - telegram
+securityDefinitions:
+  ServiceKey:
+    description: Ключ для service-to-service аутентификации
+    in: header
+    name: X-Service-Key
+    type: apiKey
+swagger: "2.0"
