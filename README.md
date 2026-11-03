@@ -1,236 +1,102 @@
-# Telegram Bot Service
+# markerloop-bot
 
-Сервис Telegram бота для системы MarkerLoop. Обеспечивает интеграцию с Telegram для уведомлений, авторизации и тестирования API.
+The Telegram bot of the Markerloop platform: users sign in to Markerloop through the bot, and other services deliver
+notifications to Telegram through it (personal messages, broadcasts, deploy and regression alerts).
 
-## 🚀 Возможности
+Markerloop is a shared backend (users, auth, files, collections, notifications, i18n) plus a page builder that an AI
+agent drives through MCP. The bot holds no database of its own: accounts live in `user-service`, tokens come from
+`auth-service`, bot texts come from `dictionary-service`, and short-lived state (sessions, login codes, dialog steps,
+idempotency keys) lives in Redis.
 
-- **Авторизация через Telegram** - привязка Telegram аккаунта к пользователю системы
-- **Уведомления** - отправка уведомлений о деплоях, ошибках и событиях
-- **API тестирование** - удобный интерфейс для тестирования API через бота
-- **Webhook поддержка** - получение обновлений от Telegram
-- **История запросов** - сохранение и просмотр истории API запросов
+## Responsibilities
 
-## 🏗️ Архитектура
+- **Sign-in through Telegram.** The admin UI asks the bot for a one-time token and a `t.me/<bot>?start=<token>` deep
+  link (`POST /api/v1/oauth/generate-token`). The user opens the link, `/start <token>` binds the Telegram account to
+  the Markerloop user as an external account in `user-service` and completes the login. A first-time Telegram user is
+  registered automatically.
+- **Sign-in with a password in the chat.** `/auth` starts a short dialog against `auth-service`: username, then
+  password; if there is no such account, the bot asks for an email and registers one.
+- **Menu for signed-in users:** `/menu`, `/profile`, `/settings`, `/notifications`, `/logout`, and role-gated
+  `/users` and `/stats`.
+- **Account deletion in progress.** While `user-service` reports a pending deletion (HTTP 423), the bot refuses to
+  sign the user in or to create a fresh account, so a half-deleted account cannot be revived through Telegram.
+- **Notification delivery** for other services: to one user, to everyone, and to deploy subscribers.
+- **Regression alerts with recovery.** A red regression run sends an alert and leaves a marker in Redis; the next
+  green run of the same app sends a single "green again" message and clears the marker. Two concurrent deliveries
+  announce the recovery once; if Redis is down the recovery message is skipped rather than sent on every green run.
+
+## Security
+
+- **Service-to-service key.** `/api/v1/oauth/*` and `/api/v1/notifications/*` require the `X-Service-Key` header
+  (go-sdk `ServiceToServiceAuth`); without it or with a wrong one the answer is `401`, before any other work.
+- **Webhook secret.** With `TELEGRAM_WEBHOOK_SECRET` set, a webhook call without the matching
+  `X-Telegram-Bot-Api-Secret-Token` gets `401`. In webhook mode the service refuses to start without a secret, and on
+  start it registers the webhook with Telegram together with that secret.
+- **Idempotent delivery.** Notification endpoints accept an optional `Idempotency-Key`; a repeated delivery returns
+  `200 {"duplicate": true}` without sending the message again, so retries from `notification-service` never double-post.
+- **PII-safe logs.** Message text, tokens and passwords are not logged: commands are logged by name, tokens by
+  fingerprint. Tests guard both.
+
+## API
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | Health check |
+| GET | `/swagger/*any` | Swagger UI |
+| POST | `/api/v1/webhook/telegram` | Telegram updates (webhook mode) |
+| POST | `/api/v1/oauth/generate-token` | One-time token and deep link for Telegram sign-in · service key |
+| POST | `/api/v1/notifications/send` | Message to one user · service key |
+| POST | `/api/v1/notifications/broadcast` | Message to all users · service key |
+| POST | `/api/v1/notifications/deploy` | Deploy and regression events (`regression-failed`, `regression-passed`) · service key |
+
+## Project structure
 
 ```
-Telegram Bot API → Webhook → Telegram Bot Service → Gateway → Microservices
-                                    ↓
-                               PostgreSQL + Redis
+main.go               entry point and wiring
+internal/
+  config/             environment configuration
+  handlers/           HTTP and Telegram update handlers
+  middleware/         webhook secret, idempotency, session
+  routes/             Gin routes
+  services/           sign-in flows, menus, delivery, regression state
+  startup/            webhook registration and start-up checks
+pkg/
+  telegram/           Telegram Bot API client
+  auth_client/        auth-service client
+  user_client/        user-service client
+  dictionary_client/  bot texts from dictionary-service
+  i18n/               locale selection
+docs/                 generated Swagger
 ```
 
-## 📦 Структура проекта
-
-```
-markerloop-bot/            # репозиторий markerloop-bot; go-модуль исторически называется telegram-bot-service
-├── cmd/
-│   └── server/          # Точка входа
-├── internal/
-│   ├── config/          # Конфигурация
-│   ├── handlers/        # HTTP обработчики
-│   ├── models/          # Модели данных
-│   ├── routes/          # Маршрутизация
-│   └── services/        # Бизнес-логика
-├── pkg/
-│   └── telegram/        # Telegram Bot API клиент
-├── go.mod               # Зависимости Go
-├── Dockerfile           # Docker образ
-├── env.example          # Пример конфигурации
-└── README.md            # Документация
-```
-
-## 🔧 Установка и запуск
-
-### 1. Создание Telegram бота
-
-1. Найдите [@BotFather](https://t.me/botfather) в Telegram
-2. Отправьте команду /newbot
-3. Следуйте инструкциям для создания бота
-4. Сохраните полученный токен
-
-### 2. Настройка webhook (опционально)
+## Running locally
 
 ```bash
-# Установка webhook
-curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
-     -H "Content-Type: application/json" \
-     -d '{"url": "https://your-domain.com/api/v1/webhook/telegram"}'
-
-# Проверка webhook
-curl "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
+cp env.example .env      # fill in TELEGRAM_BOT_TOKEN, SERVICE_KEY and service URLs
+go run main.go           # TELEGRAM_USE_POLLING=true avoids the need for a public webhook URL
 ```
 
-### 3. Конфигурация
+Docker:
 
 ```bash
-cp env.example .env
-# Отредактируйте .env файл
-```
-
-### 4. Запуск
-
-```bash
-# Локально
-go run main.go
-
-# Или через Air (hot reload)
-air
-
-# Docker
 docker build -t markerloop-bot .
 docker run -p 8085:8085 --env-file .env markerloop-bot
 ```
 
-## ⚙️ Конфигурация
+Configuration (see `env.example`): `PORT`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WEBHOOK_URL`,
+`TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_USE_POLLING`, `REDIS_ADDR`, `GATEWAY_URL`, `AUTH_SERVICE_URL`, `USER_SERVICE_URL`,
+`NOTIFICATION_SERVICE_URL`, `DICTIONARY_SERVICE_URL`, `SERVICE_KEY`, `OAUTH_TOKEN_TTL`, `NOTIFY_IDEMPOTENCY_TTL`.
 
-### Основные настройки
+## Notes
 
-```bash
-# Сервер
-PORT=8085
-HOST=0.0.0.0
+- The Go module is still named `telegram-bot-service` for historical reasons; the repository is `markerloop-bot`.
+- The service imports the shared library as `gitlab.com/markerloop/go-sdk` (private GitLab). The same library is
+  published as [Markerloop-Team/go-sdk](https://github.com/Markerloop-Team/go-sdk); to build outside our CI, clone it
+  and add `replace gitlab.com/markerloop/go-sdk => ../go-sdk` to `go.mod`.
+- Code comments are partly in Russian: this is the production code of a Kazakhstan-based team, published as is.
 
-# Telegram Bot
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_WEBHOOK_URL=https://your-domain.com/webhook/telegram
+Website: [markerloop.com](https://markerloop.com) · Code: [github.com/Markerloop-Team](https://github.com/Markerloop-Team)
 
-# База данных
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=postgres
-DB_PASSWORD=password
-DB_NAME=telegram_bot
+---
 
-# Redis
-REDIS_ADDR=localhost:6379
-REDIS_PASSWORD=
-REDIS_DB=1
-
-# Внешние сервисы
-GATEWAY_URL=http://localhost:8080
-AUTH_SERVICE_URL=http://localhost:8081
-USER_SERVICE_URL=http://localhost:8082
-```
-
-## 📡 API Endpoints
-
-### Health Check
-- `GET /health` - Проверка состояния сервиса
-
-### Telegram Webhook
-- `POST /api/v1/webhook/telegram` - Webhook для получения обновлений от Telegram
-
-### Авторизация
-- `POST /api/v1/telegram/link` - Привязка Telegram аккаунта
-- `POST /api/v1/telegram/auth-code/:user_id` - Генерация кода авторизации
-
-### Уведомления
-- `POST /api/v1/notifications/send` - Отправка уведомления пользователю
-- `POST /api/v1/notifications/broadcast` - Рассылка всем пользователям
-- `POST /api/v1/notifications/deploy` - Рассылка подписчикам deploy-нотификаций (ArgoCD, регресс dev-infra)
-
-Все три принимают необязательный заголовок `Idempotency-Key`: повтор той же доставки
-отвечает `200 {"duplicate": true}` без сообщения (SDL-345).
-
-#### Регресс dev-infra: красный и «снова зелёный» (SDL-715)
-
-Эндпоинт deploy-нотификаций различает события по `event_type`:
-
-| `event_type` | Что делает бот | Ответ |
-|---|---|---|
-| `regression-failed` | рассылает красный алерт как раньше и ставит в Redis отметку `notify:regression:red:<app>` (значение — `revision_url`, без TTL) | `200 {"status":"sent"}` |
-| `regression-passed` | отметка есть → одно сообщение «✅ регресс снова зелёный» со ссылкой из `revision_url` и снятие отметки; отметки нет → без сообщения | `200 {"status":"sent"}` или `200 {"status":"skipped"}` |
-
-Тело `regression-passed` (обязателен только `app`, он должен совпадать с `app` красного события):
-
-```json
-{
-  "app": "full-regression",
-  "status": "success",
-  "event_type": "regression-passed",
-  "revision_url": "<URL пайплайна>"
-}
-```
-
-Почему так:
-- отметка без TTL: красный регресс бывает долгим, а TTL короче него молча съел бы «снова зелёный»; ключ один на `app`, копиться нечему;
-- Redis недоступен → «снова зелёный» пропускается (ответ всё равно 200): лучше промолчать, чем слать его на каждый зелёный прогон. Красный алерт при этом уходит как раньше;
-- две одновременные доставки, увидевшие отметку, объявляют один раз (claim `notify:regression:recover-claim:<app>`, TTL 2 мин);
-- провал рассылки «снова зелёный» → `500`, отметка остаётся, объявит следующий зелёный прогон или ретрай.
-
-### API тестирование
-- `POST /api/v1/api-test/test` - Тестирование API
-- `GET /api/v1/api-test/history/:user_id` - История API запросов
-
-## 🤖 Команды бота
-
-- /start - Начать работу с ботом
-- /help - Показать справку
-- /link - Привязать аккаунт к системе
-- /test - Тестировать API
-- /history - История API запросов
-
-## 🔗 Интеграция с системой
-
-### 1. Привязка аккаунта
-
-1. Пользователь получает код авторизации в веб-интерфейсе
-2. Отправляет команду /link в бот
-3. Вводит полученный код
-4. Аккаунт привязывается к системе
-
-### 2. Отправка уведомлений
-
-```bash
-# Отправка уведомления конкретному пользователю
-curl -X POST "http://localhost:8085/api/v1/notifications/send" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "user_id": "user_id_here",
-       "title": "Деплой завершен",
-       "message": "Новая версия успешно развернута"
-     }'
-
-# Рассылка всем пользователям
-curl -X POST "http://localhost:8085/api/v1/notifications/broadcast" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "title": "Техническое обслуживание",
-       "message": "Система будет недоступна с 02:00 до 04:00"
-     }'
-```
-
-### 3. Тестирование API
-
-```bash
-# Тестирование API через бота
-curl -X POST "http://localhost:8085/api/v1/api-test/test" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "user_id": "user_id_here",
-       "method": "GET",
-       "url": "http://localhost:8080/api/v1/users",
-       "headers": "{\"Authorization\": \"Bearer token_here\"}"
-     }'
-```
-
-## 🗄️ База данных
-
-Сервис использует PostgreSQL для хранения:
-- Привязок Telegram аккаунтов к пользователям
-- Уведомлений
-- Истории API запросов
-
-Redis используется для:
-- Временного хранения кодов авторизации
-- Кэширования
-
-## 🔒 Безопасность
-
-- Webhook проверяется по секретному ключу: при заданном `TELEGRAM_WEBHOOK_SECRET` запрос без верного заголовка `X-Telegram-Bot-Api-Secret-Token` получает 401; в режиме вебхука (`TELEGRAM_WEBHOOK_URL` задан, `TELEGRAM_USE_POLLING` не `true`) без секрета сервис не стартует на любом `ENV`. На старте бот сам регистрирует вебхук у Telegram вместе с `secret_token`, ручной `setWebhook` без секрета перестанет доставлять обновления до рестарта пода.
-- Коды авторизации имеют ограниченное время жизни
-- Все API запросы логируются
-- Поддержка HTTPS для webhook
-
-## 📊 Мониторинг
-
-Сервис предоставляет метрики через /health endpoint и логирует все операции для мониторинга и отладки.
+Source published for review. © Markerloop. All rights reserved.
